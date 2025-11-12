@@ -55,6 +55,7 @@ void loop()
   }
   
   //This code creates the PWM signal on each pin based on the speed provided
+  encoder
   backLeftMotor.writeMicroseconds(backLeftSpeed);           //Back left motor driver code
   if(change == true){Serial.printf("wrote: %d to pin : %d", backLeftSpeed, backLeftPin);}
 }
