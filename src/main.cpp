@@ -1,60 +1,103 @@
-
-//A delay of 1000 Microseconds is Full Reverse
-//A delay of 1000 to 1460 Microseconds is Proportional Reverse
-//A delay of 1460 to 1540 Microseconds is neutral
-//A delay of 1540 to 2000 Microseconds is Proportional Forward
-//A delay of 2000 Microseconds is Full Forward
-
+#include <Arduino.h>
 #include <Servo.h>
 
-int backLeftPin = ;      //Back Left Motor pin
-volatile int backLeftSpeed = 1460; //Back Left Motor starting speed
-Servo backLeftMotor;           //Back Left Motor Servo Object
+// --- Configuration ---
+// Define the GPIO pin numbers. These are the same as the Pico's physical GP pins.
+#define encoderPinA 14
+#define encoderPinB 15
+#define LED1 16
+#define LED2 17
+int backLeftPin = 9; // Pin for the ESC/Motor
 
-int Speed = 1460;           //Starting speed for Serial communication
-bool change = false;
+// --- Macros for fast reading ---
+// The Arduino core handles the fast digitalRead() for RP2040 interrupts.
+#define readA digitalRead(encoderPinA)
+#define readB digitalRead(encoderPinB)
+
+// --- Variables ---
+volatile int count = 0;
+int protectedCount = 0;
+int previousCount = 0;
+volatile int backLeftSpeed = 1460; 
+Servo backLeftMotor;
+
+void isrA();
+void isrB();
 
 void setup()
 {
-  // Tells each of the servo objects which pin it should output to
-  backLeftMotor.attach(backLeftPin);
+    // Initialize motor
+    backLeftMotor.attach(backLeftPin); 
 
-  Serial.begin(115200);
+    // Use Arduino pinMode() for input setup
+    // This replaces gpio_init(), gpio_set_dir(), and gpio_pull_up()
+    pinMode(encoderPinA, INPUT_PULLUP);
+    pinMode(encoderPinB, INPUT_PULLUP);
+	pinMode(LED1, OUTPUT);
+	pinMode(LED2, OUTPUT);
+	digitalWrite(LED1, LOW);
+	digitalWrite(LED2, LOW);
+	digitalReadFast(1);
+
+    // Attach interrupts to the pins on both CHANGE (RISING and FALLING)
+    attachInterrupt(digitalPinToInterrupt(encoderPinA), isrA, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(encoderPinB), isrB, CHANGE);
+    
+    Serial.begin(115200);
+    delay(1000); // Give time for serial to initialize
+    Serial.println("Encoder and Servo system active.");
 }
 
 void loop()
 {
-  // This code is used when controlling using serial
+    // Safely read the volatile count variable
+    noInterrupts();
+    protectedCount = count;
+    interrupts();
 
-  // FORMAT Example: fr 2000
-  // FORMAT Example: a 1500
-
-  // If you send the character "a" then all the motors will run at the provided speed
-  // fr -> front right
-  // fl -> front left
-  // br -> back right
-  // bl -> back left
-  if (Serial.available() > 0) {
-    char fb = Serial.read();
-    if (fb == 'a') {
-		Serial.println("got a");
-		Serial.println(backLeftSpeed, backLeftPin);
+    // Only print when the count changes
+    if(protectedCount != previousCount) {
+        Serial.print("Encoder Count: ");
+        Serial.println(protectedCount);
     }
-    else {
-      char lr = Serial.read();
-      Speed = Serial.parseInt();
-      if (fb == 'b') {
-        if (lr == 'l') {
-          backLeftSpeed = Speed;
-		  //change = true;
-		  Serial.printf("wrote: %d to pin : %d", backLeftSpeed, backLeftPin);
-		}
-	  }
+    previousCount = protectedCount;
+	if(protectedCount >= 1500){
+		digitalWrite(LED1, HIGH);
+		digitalWrite(LED2, LOW);
 	}
-    Serial.println(Speed);
-  }
-  
-  //This code creates the PWM signal on each pin based on the speed provided
-  backLeftMotor.writeMicroseconds(backLeftSpeed);           //Back left motor driver code
-  if(change == true){Serial.printf("wrote: %d to pin : %d", backLeftSpeed, backLeftPin);}
+	if(protectedCount <= -1500){
+		digitalWrite(LED2, HIGH);
+		digitalWrite(LED1, LOW);
+	}
+    
+    // Write the speed to the ESC/motor (PWM microseconds)
+    // Uncomment this when you are ready to control the motor:
+    // backLeftMotor.writeMicroseconds(backLeftSpeed);
+    
+    // Simple delay to keep loop from running too fast (optional)
+    // delay(10); 
+	//Serial.println(digitalRead(encoderPinA) + digitalRead(encoderPinB));
+	//Serial.println(digitalRead(11));
+}
+
+// --- Interrupt Service Routines (ISRs) ---
+// Note: This logic assumes a standard quadrature encoder setup.
+void isrA() { 
+    // When A changes, check B to determine direction.
+    // Assuming A leads B for one direction (e.g., CW)
+    if (readA != readB) {
+        count++; 
+    } else {
+        count--; 
+    }
+}
+
+void isrB() { 
+    // When B changes, check A to determine direction.
+    // Ensures counts are captured regardless of which pin changes first.
+    if (readB == readA) {
+        count++;
+    } else {
+        count--;
+    }
 }
