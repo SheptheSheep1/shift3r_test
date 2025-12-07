@@ -64,12 +64,25 @@ void loop()
 	if(protectedCount >= 1500){
 		digitalWrite(LED1, HIGH);
 		digitalWrite(LED2, LOW);
+		noInterrupts();
+		backLeftMotor.writeMicroseconds(1500);
+		delay(500);
+		count = 0;
+		protectedCount = 0;
+		interrupts();
+		backLeftMotor.writeMicroseconds(1600);
+		Serial.println("fwd");
 	}
-	if(protectedCount <= -1500){
-		digitalWrite(LED2, HIGH);
-		digitalWrite(LED1, LOW);
-	}
-    
+	//else if(protectedCount < 1500 && protectedCount > -1500){
+	//	backLeftMotor.writeMicroseconds(1500);
+	//	Serial.println("neutral");
+	//}
+	//else if(protectedCount <= -1500){
+	//	digitalWrite(LED2, HIGH);
+	//	digitalWrite(LED1, LOW);
+	//	backLeftMotor.writeMicroseconds(1600);
+	//	Serial.println("fwd");
+	//}
     // Write the speed to the ESC/motor (PWM microseconds)
     // Uncomment this when you are ready to control the motor:
     // backLeftMotor.writeMicroseconds(backLeftSpeed);
