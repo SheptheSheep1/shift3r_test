@@ -13,6 +13,8 @@ int backLeftPin = 9; // Pin for the ESC/Motor
 // The Arduino core handles the fast digitalRead() for RP2040 interrupts.
 #define readA digitalRead(encoderPinA)
 #define readB digitalRead(encoderPinB)
+#define FULL_SHIFT_COUNT 1700
+#define HALF_SHIFT_COUNT 1000
 
 // --- Variables ---
 volatile int count = 0;
@@ -20,6 +22,10 @@ int protectedCount = 0;
 int previousCount = 0;
 volatile int backLeftSpeed = 1460; 
 Servo backLeftMotor;
+volatile bool shiftUpRequested = false;
+volatile bool shiftDownRequested = true;
+unsigned long startMillis;
+unsigned long currentMillis;
 
 void isrA();
 void isrB();
@@ -46,6 +52,12 @@ void setup()
     Serial.begin(115200);
     delay(1000); // Give time for serial to initialize
     Serial.println("Encoder and Servo system active.");
+	shiftDownRequested = true;
+	startMillis = millis();
+}
+
+void requestShiftUp(){
+	shiftUpRequested = true;
 }
 
 void loop()
@@ -54,25 +66,57 @@ void loop()
     noInterrupts();
     protectedCount = count;
     interrupts();
+	if(shiftUpRequested){
+		// attempt shift up
+		// if in first gear shift blah blah blah
+
+
+		shiftUpRequested = false;
+	}
+	if(shiftDownRequested){
+		Serial.println("Shift Down Requested...");
+		currentMillis = millis();
+		Serial.println(currentMillis-startMillis);
+		if (currentMillis - startMillis < 1000)  //test whether the period has elapsed
+		{
+			//digitalWrite(ledPin, !digitalRead(ledPin));  //if so, change the state of the LED.  Uses a neat trick to change the state
+			//startMillis = currentMillis;  //IMPORTANT to save the start time of the current LED state.
+			Serial.print("\nencoder, ");
+			Serial.print(protectedCount);
+			backLeftMotor.writeMicroseconds(1400);
+			if (protectedCount >= FULL_SHIFT_COUNT){
+				Serial.println("shift down successful");
+				backLeftMotor.writeMicroseconds(1500);
+				shiftDownRequested = false;
+			}
+		}else {
+			Serial.println("timeout");
+			shiftDownRequested = false;
+		}
+		
+
+		//shiftDownRequested = false;
+	}
 
     // Only print when the count changes
     if(protectedCount != previousCount) {
-        Serial.print("Encoder Count: ");
-        Serial.println(protectedCount);
+        //Serial.print("Encoder Count: ");
+        //Serial.println(protectedCount);
     }
     previousCount = protectedCount;
-	if(protectedCount >= 1500){
-		digitalWrite(LED1, HIGH);
-		digitalWrite(LED2, LOW);
-		noInterrupts();
-		backLeftMotor.writeMicroseconds(1500);
-		delay(500);
-		count = 0;
-		protectedCount = 0;
-		interrupts();
-		backLeftMotor.writeMicroseconds(1600);
-		Serial.println("fwd");
-	}
+	
+	//if(protectedCount >= 1500){
+	//	digitalWrite(LED1, HIGH);
+	//	digitalWrite(LED2, LOW);
+	//	noInterrupts();
+	//	backLeftMotor.writeMicroseconds(1500);
+	//	delay(500);
+	//	count = 0;
+	//	protectedCount = 0;
+	//	interrupts();
+	//	backLeftMotor.writeMicroseconds(1600);
+	//	Serial.println("fwd");
+	//}
 	//else if(protectedCount < 1500 && protectedCount > -1500){
 	//	backLeftMotor.writeMicroseconds(1500);
 	//	Serial.println("neutral");
