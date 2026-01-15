@@ -1,13 +1,19 @@
 #include <Arduino.h>
 #include <Servo.h>
+extern "C" {
+	#include <hardware/flash.h>
+	#include <hardware/sync.h>
+};
 
-// --- Configuration ---
-// Define the GPIO pin numbers. These are the same as the Pico's physical GP pins.
-#define encoderPinA 14
-#define encoderPinB 15
-#define LED1 16
-#define LED2 17
-int backLeftPin = 9; // Pin for the ESC/Motor
+// --- Defines ---
+#define FLASH_TARGET_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+constexpr uint8_t ENCODER_PIN_A = 14;
+constexpr uint8_t ENCODER_PIN_B = 15;
+constexpr uint8_t LED_1 = 16;
+constexpr uint8_t LED_2 = 17;
+constexpr uint8_t ESC_PIN_PWM = 9;
+constexpr uint8_t UP = 1;
+constexpr uint8_t DOWN = 0
 
 // --- Macros for fast reading ---
 // The Arduino core handles the fast digitalRead() for RP2040 interrupts.
@@ -21,43 +27,123 @@ volatile int count = 0;
 int protectedCount = 0;
 int previousCount = 0;
 volatile int backLeftSpeed = 1460; 
-Servo backLeftMotor;
+Servo esc;
 volatile bool shiftUpRequested = false;
-volatile bool shiftDownRequested = true;
+volatile bool shiftDownRequested = false;
 unsigned long startMillis;
 unsigned long currentMillis;
 
+// --- Pointers for Flash Writes ---
+int8_t buf[FLASH_PAGE_SIZE/sizeof(int8_t)];  // One page buffer of ints
+int8_t *p;
+uint32_t addr;
+uint8_t page; // prevent comparison of unsigned and signed int
+int first_empty_page = -1;
+int8_t gearCount = 0;
+
+void saveGearProtected(int8_t value){
+	// implements wear-leveling
+	// from https://makermatrix.com
+	
+	*buf = value;
+
+	for(page = 0; page < FLASH_SECTOR_SIZE/FLASH_PAGE_SIZE; page++){
+		addr = XIP_BASE + FLASH_TARGET_OFFSET + (page * FLASH_PAGE_SIZE);
+		p = (int8_t *)addr;
+		Serial.print("First four bytes of page " + String(page, DEC) );
+		Serial.print("( at 0x" + (String(int(p), HEX)) + ") = ");
+		Serial.println(*p);
+		if( *p == -1 && first_empty_page < 0){
+			first_empty_page = page;
+			Serial.println("First empty page is #" + String(first_empty_page, DEC));
+		}
+	}
+	if (first_empty_page < 0){
+		Serial.println("Full sector, erasing...");
+		uint32_t ints = save_and_disable_interrupts();
+		flash_range_erase(FLASH_TARGET_OFFSET, FLASH_SECTOR_SIZE);
+		first_empty_page = 0;
+		restore_interrupts (ints);
+	}
+	Serial.println("Writing to page #" + String(first_empty_page, DEC));
+	uint32_t ints = save_and_disable_interrupts();
+	flash_range_program(FLASH_TARGET_OFFSET + (first_empty_page*FLASH_PAGE_SIZE), (uint8_t *)buf, FLASH_PAGE_SIZE);
+	restore_interrupts (ints);
+}
+
+int8_t* readGearFlash(){
+	for(page = 0; page < FLASH_SECTOR_SIZE/FLASH_PAGE_SIZE; page++){
+		addr = XIP_BASE + FLASH_TARGET_OFFSET + (page * FLASH_PAGE_SIZE);
+		p = (int8_t*)addr;
+		Serial.print("First four bytes of page " + String(page, DEC) );
+		Serial.print("( at 0x" + (String(int(p), HEX)) + ") = ");
+		Serial.println(*p);
+		if( *p == -1 && first_empty_page < 0){
+			first_empty_page = page;
+			Serial.println("First empty page is #" + String(first_empty_page, DEC));
+		}
+	}
+	return p;
+}
+
 void isrA();
 void isrB();
+int8_t calcNextGear(uint8_t direction);
+
+
+/***
+ * @brief Calculates next gear to shift to based on direction if available or returns -1.
+ * @details Returns -1 if no valid next gear for direction, return nextGear number 1-6
+ **/
+int8_t calcNextGear(uint8_t currentGear, uint8_t direction){
+	if (direction == UP){
+		if (currentGear < 6 && currentGear >= 1){
+			return currentGear++;
+		}//else
+	}
+	if(direction == DOWN){
+		if(currentGear >= 1 && currentGear <= 6){
+			return currentGear--;
+		} //else
+	}
+}
 
 void setup()
 {
     // Initialize motor
-    backLeftMotor.attach(backLeftPin); 
+    esc.attach(ESC_PIN_PWM); 
 
     // Use Arduino pinMode() for input setup
     // This replaces gpio_init(), gpio_set_dir(), and gpio_pull_up()
-    pinMode(encoderPinA, INPUT_PULLUP);
-    pinMode(encoderPinB, INPUT_PULLUP);
-	pinMode(LED1, OUTPUT);
-	pinMode(LED2, OUTPUT);
-	digitalWrite(LED1, LOW);
-	digitalWrite(LED2, LOW);
-	digitalReadFast(1);
+    pinMode(ENCODER_PIN_A, INPUT_PULLUP);
+	//gpio_pull_up(encoderPinA);
+    pinMode(ENCODER_PIN_B, INPUT_PULLUP);
+	pinMode(LED_1, OUTPUT);
+	pinMode(LED_2, OUTPUT);
+	digitalWrite(LED_1, LOW);
+	digitalWrite(LED_2, LOW);
+	//digitalReadFast(1);
 
     // Attach interrupts to the pins on both CHANGE (RISING and FALLING)
-    attachInterrupt(digitalPinToInterrupt(encoderPinA), isrA, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(encoderPinB), isrB, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_A), isrA, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_B), isrB, CHANGE);
     
     Serial.begin(115200);
+	// restore gear from flash
+	gearCount = *readGearFlash();
+
     delay(1000); // Give time for serial to initialize
     Serial.println("Encoder and Servo system active.");
 	shiftDownRequested = true;
 	startMillis = millis();
 }
 
-void requestShiftUp(){
+void requestShiftUp(void){
 	shiftUpRequested = true;
+}
+
+void requestShiftDown(void){
+	shiftDownRequested = true;
 }
 
 void loop()
@@ -70,24 +156,62 @@ void loop()
 		// attempt shift up
 		// if in first gear shift blah blah blah
 
+		Serial.println("Shift Up Requested...");
 
-		shiftUpRequested = false;
-	}
-	if(shiftDownRequested){
-		Serial.println("Shift Down Requested...");
+		if(shiftDownRequested){
+			Serial.println("Canceling Shift Down...");
+			noInterrupts();
+			esc.writeMicroseconds(1500);
+			shiftDownRequested = false;
+			interrupts();
+		}
+
 		currentMillis = millis();
 		Serial.println(currentMillis-startMillis);
 		if (currentMillis - startMillis < 1000)  //test whether the period has elapsed
 		{
-			//digitalWrite(ledPin, !digitalRead(ledPin));  //if so, change the state of the LED.  Uses a neat trick to change the state
-			//startMillis = currentMillis;  //IMPORTANT to save the start time of the current LED state.
 			Serial.print("\nencoder, ");
 			Serial.print(protectedCount);
-			backLeftMotor.writeMicroseconds(1400);
+			esc.writeMicroseconds(1400);
+			if (protectedCount >= FULL_SHIFT_COUNT){
+				Serial.println("shift up successful");
+				esc.writeMicroseconds(1500);
+				shiftUpRequested = false;
+				gearCount++;
+				saveGearProtected(gearCount);
+			}
+		}else {
+			Serial.println("timeout");
+			shiftUpRequested = false;
+		}
+
+		//shiftUpRequested = false;
+	}
+	if(shiftDownRequested){
+		Serial.println("Shift Down Requested...");
+
+		if(shiftUpRequested){
+			Serial.println("Canceling Shift Up...");
+			noInterrupts();
+			esc.writeMicroseconds(1500);
+			shiftUpRequested = false;
+			//gearCount--;
+			interrupts();
+		}
+
+		currentMillis = millis();
+		Serial.println(currentMillis-startMillis);
+		if (currentMillis - startMillis < 1000)  //test whether the period has elapsed
+		{
+			Serial.print("\nencoder, ");
+			Serial.print(protectedCount);
+			esc.writeMicroseconds(1400);
 			if (protectedCount >= FULL_SHIFT_COUNT){
 				Serial.println("shift down successful");
-				backLeftMotor.writeMicroseconds(1500);
+				esc.writeMicroseconds(1500);
 				shiftDownRequested = false;
+				saveGearProtected(gearCount);
+				//TODO: sort out another shift request happening while gear is being saved to memory
 			}
 		}else {
 			Serial.println("timeout");
@@ -104,45 +228,12 @@ void loop()
         //Serial.println(protectedCount);
     }
     previousCount = protectedCount;
-	
-	//if(protectedCount >= 1500){
-	//	digitalWrite(LED1, HIGH);
-	//	digitalWrite(LED2, LOW);
-	//	noInterrupts();
-	//	backLeftMotor.writeMicroseconds(1500);
-	//	delay(500);
-	//	count = 0;
-	//	protectedCount = 0;
-	//	interrupts();
-	//	backLeftMotor.writeMicroseconds(1600);
-	//	Serial.println("fwd");
-	//}
-	//else if(protectedCount < 1500 && protectedCount > -1500){
-	//	backLeftMotor.writeMicroseconds(1500);
-	//	Serial.println("neutral");
-	//}
-	//else if(protectedCount <= -1500){
-	//	digitalWrite(LED2, HIGH);
-	//	digitalWrite(LED1, LOW);
-	//	backLeftMotor.writeMicroseconds(1600);
-	//	Serial.println("fwd");
-	//}
-    // Write the speed to the ESC/motor (PWM microseconds)
-    // Uncomment this when you are ready to control the motor:
-    // backLeftMotor.writeMicroseconds(backLeftSpeed);
-    
-    // Simple delay to keep loop from running too fast (optional)
-    // delay(10); 
-	//Serial.println(digitalRead(encoderPinA) + digitalRead(encoderPinB));
-	//Serial.println(digitalRead(11));
 }
 
-// --- Interrupt Service Routines (ISRs) ---
-// Note: This logic assumes a standard quadrature encoder setup.
+// --- Interrupt Service Routines ---
 void isrA() { 
-    // When A changes, check B to determine direction.
     // Assuming A leads B for one direction (e.g., CW)
-    if (readA != readB) {
+    if (digitalReadFast(ENCODER_PIN_A) != digitalReadFast(ENCODER_PIN_B)) {
         count++; 
     } else {
         count--; 
@@ -150,9 +241,8 @@ void isrA() {
 }
 
 void isrB() { 
-    // When B changes, check A to determine direction.
     // Ensures counts are captured regardless of which pin changes first.
-    if (readB == readA) {
+    if (digitalReadFast(ENCODER_PIN_A) == digitalReadFast(ENCODER_PIN_B)) {
         count++;
     } else {
         count--;
