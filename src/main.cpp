@@ -16,11 +16,11 @@ constexpr uint8_t SHIFT_DOWN_PIN = 18;
 constexpr uint8_t SHIFT_UP_PIN = 19;
 constexpr uint8_t UP = 1;
 constexpr uint8_t DOWN = 0;
+constexpr uint8_t ECU_PWM_PIN = 4;
+constexpr uint8_t ECU_RANGE = 255;
 
 // --- Macros for fast reading ---
 // The Arduino core handles the fast digitalRead() for RP2040 interrupts.
-#define readA digitalRead(encoderPinA)
-#define readB digitalRead(encoderPinB)
 #define FULL_SHIFT_COUNT 1700
 #define HALF_SHIFT_COUNT 1000
 
@@ -40,6 +40,13 @@ volatile bool upError = false;
 volatile bool downError = false;
 unsigned long startMillis;
 unsigned long currentMillis;
+// voltage for different gears: 1-0.0V, 2-1.0V, 3-2.0V, 4-3.0V, 5-4.0V, 6-5.0V
+constexpr uint8_t DUTY_GEAR_1 = 0; // duty cycle for different gears 1-
+constexpr uint8_t DUTY_GEAR_2 = 51;
+constexpr uint8_t DUTY_GEAR_3 = 102;
+constexpr uint8_t DUTY_GEAR_4 = 153;
+constexpr uint8_t DUTY_GEAR_5 = 204;
+constexpr uint8_t DUTY_GEAR_6 = 255;
 
 // --- Pointers for Flash Writes ---
 int8_t buf[FLASH_PAGE_SIZE/sizeof(int8_t)];  // One page buffer of ints
@@ -106,6 +113,7 @@ void isrB();
 void requestShiftDown();
 void requestShiftUp();
 int8_t calcNextGear(uint8_t direction);
+uint8_t writeGearPos(uint8_t gearPosition);
 
 
 /***
@@ -113,22 +121,46 @@ int8_t calcNextGear(uint8_t direction);
  * @details Returns -1 if no valid next gear for direction, return nextGear number 1-6
  **/
 int8_t calcNextGear(uint8_t currentGear, uint8_t direction){
-	if (direction == UP){
+	switch (direction) {
+		case UP:
 		if (currentGear < 6 && currentGear >= 1){
 			Serial.println("shifting up from :"+String(currentGear));
 			currentGear++;
 			return currentGear;
 		}//else
-	}
-	if(direction == DOWN){
+		case DOWN:
 		if(currentGear >= 1 && currentGear <= 6){
 			Serial.println("shifting down from :"+String(currentGear));
 			currentGear--;
 			return currentGear;
 		} //else
+		default:
+			Serial.println("error; unexpected direction");
+			break;
 	}
 	Serial.println("next gear error");
 	return -1;
+}
+
+uint8_t writeGearPos(int8_t gearPosition){
+	switch (gearPosition) {
+		case 1:
+			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_1));
+		case 2:
+			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_2));
+		case 3:
+			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_3));
+		case 4:
+			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_4));
+		case 5:
+			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_5));
+		case 6:
+			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_6));
+		default:
+			Serial.println("error!!! invalid gear pos: "+String(gearPosition));
+			return -1; // error
+	}
+	return 0; // no error
 }
 
 void setup()
@@ -147,6 +179,9 @@ void setup()
 	pinMode(LED_2, OUTPUT);
 	digitalWrite(LED_1, LOW);
 	digitalWrite(LED_2, LOW);
+	pinMode(ECU_PWM_PIN, OUTPUT);
+	analogWriteFreq(100000);
+	analogWriteRange(255);
 	//digitalReadFast(1);
 
     // Attach interrupts to the pins on both CHANGE (RISING and FALLING)
@@ -304,6 +339,7 @@ void loop()
         //Serial.println(protectedCount);
     }
     previousCount = protectedCount;
+	writeGearPos(gearCount);
 }
 
 // --- Interrupt Service Routines ---
