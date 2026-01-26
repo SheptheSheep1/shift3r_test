@@ -18,6 +18,7 @@ constexpr uint8_t UP = 1;
 constexpr uint8_t DOWN = 0;
 constexpr uint8_t ECU_PWM_PIN = 4;
 constexpr uint8_t ECU_RANGE = 255;
+constexpr uint8_t TIME_UP_PIN = 20;
 
 // --- Macros for fast reading ---
 // The Arduino core handles the fast digitalRead() for RP2040 interrupts.
@@ -40,7 +41,11 @@ volatile bool upError = false;
 volatile bool downError = false;
 unsigned long startMillis;
 unsigned long currentMillis;
+
+
 // voltage for different gears: 1-0.0V, 2-1.0V, 3-2.0V, 4-3.0V, 5-4.0V, 6-5.0V
+// actual voltage for different gears: 1-0.55V, 2-1.10V, 3-1.65V, 4-2.20V, 5-2.75V, 6-3.30V
+// NOTE: ECU requires 5V logic, pico produces 3.3V
 constexpr uint8_t DUTY_GEAR_1 = 0; // duty cycle for different gears 1-
 constexpr uint8_t DUTY_GEAR_2 = 51;
 constexpr uint8_t DUTY_GEAR_3 = 102;
@@ -56,7 +61,7 @@ int8_t gearCount = 1;
 void saveGearProtected(int8_t value){
 	// implements wear-leveling
 	// from https://makermatrix.com
-	//
+	
 	int8_t *p;
 	uint32_t addr;
 	int first_empty_page = -1;
@@ -112,28 +117,32 @@ void isrA();
 void isrB();
 void requestShiftDown();
 void requestShiftUp();
-int8_t calcNextGear(uint8_t direction);
-uint8_t writeGearPos(uint8_t gearPosition);
+int8_t calcNextGear(int8_t gearCount, uint8_t direction);
+uint8_t writeGearPos(int8_t gearPosition);
 
 
 /***
  * @brief Calculates next gear to shift to based on direction if available or returns -1.
  * @details Returns -1 if no valid next gear for direction, return nextGear number 1-6
  **/
-int8_t calcNextGear(uint8_t currentGear, uint8_t direction){
+int8_t calcNextGear(int8_t gearCount, uint8_t direction){
+	int8_t currentGear = gearCount;
 	switch (direction) {
 		case UP:
-		if (currentGear < 6 && currentGear >= 1){
-			Serial.println("shifting up from :"+String(currentGear));
-			currentGear++;
-			return currentGear;
-		}//else
+			if (currentGear < 6 && currentGear >= 1){
+				Serial.println("shifting up from :"+String(currentGear));
+				currentGear++;
+				return currentGear;
+			}//else
 		case DOWN:
-		if(currentGear >= 1 && currentGear <= 6){
-			Serial.println("shifting down from :"+String(currentGear));
-			currentGear--;
-			return currentGear;
-		} //else
+			if(currentGear == 2){
+				Serial.println("going to neutral");
+			}
+			if(currentGear >= 1 && currentGear <= 6){
+				Serial.println("shifting down from :"+String(currentGear));
+				currentGear--;
+				return currentGear;
+			} //else
 		default:
 			Serial.println("error; unexpected direction");
 			break;
@@ -142,20 +151,31 @@ int8_t calcNextGear(uint8_t currentGear, uint8_t direction){
 	return -1;
 }
 
+/***
+ * @brief Writes to pwm gear position (inverted), intended for use with NPN transistor to go from 3.3 logic to 5
+ * @param gearPosition Current Gear Position (1-6)
+ * @return -1 if error, 0 if success
+ **/
 uint8_t writeGearPos(int8_t gearPosition){
 	switch (gearPosition) {
 		case 1:
 			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_1));
+			break;
 		case 2:
 			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_2));
+			break;
 		case 3:
 			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_3));
+			break;
 		case 4:
 			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_4));
+			break;
 		case 5:
 			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_5));
+			break;
 		case 6:
 			analogWrite(ECU_PWM_PIN, (ECU_RANGE - DUTY_GEAR_6));
+			break;
 		default:
 			Serial.println("error!!! invalid gear pos: "+String(gearPosition));
 			return -1; // error
@@ -180,6 +200,7 @@ void setup()
 	digitalWrite(LED_1, LOW);
 	digitalWrite(LED_2, LOW);
 	pinMode(ECU_PWM_PIN, OUTPUT);
+	pinMode(TIME_UP_PIN, OUTPUT);
 	analogWriteFreq(100000);
 	analogWriteRange(255);
 	//digitalReadFast(1);
@@ -192,13 +213,14 @@ void setup()
     
     Serial.begin(115200);
 	// restore gear from flash
-	//gearCount = *readGearFlash();
+	gearCount = *readGearFlash();
 	//saveGearProtected(1);
 
     delay(1000); // Give time for serial to initialize
     Serial.println("Encoder and Servo system active.");
 	Serial.print("\ngear count:");
-	Serial.print(*readGearFlash());
+	Serial.print(gearCount);
+	//Serial.print(*readGearFlash(), HEX);
 	Serial.print("\n");
 	//shiftDownRequested = true;
 }
@@ -224,14 +246,16 @@ void loop()
 		// attempt shift up
 		// if in first gear shift blah blah blah
 		if(gearCount >= 6){Serial.println("ignoring...");
+			Serial.println("current gear: "+String(gearCount));
 		shiftUpRequested = false;}
-		if(isFirstShiftUpRun){
+		if(isFirstShiftUpRun && shiftUpRequested){
 			startMillis = millis();
 			Serial.println("Shift Up Requested...");
 			Serial.println("first shift, start millis count and first shift set false");
 			isFirstShiftUpRun = false;
 			noInterrupts();
 			count = 0;
+			digitalWrite(TIME_UP_PIN, HIGH);
 			interrupts();
 		}
 
@@ -264,6 +288,7 @@ void loop()
 				isFirstShiftUpRun = true;
 				gearCount = calcNextGear(gearCount, UP);
 				if(gearCount == -1){Serial.println("Too high");}
+				digitalWrite(TIME_UP_PIN, LOW);
 				saveGearProtected(gearCount);
 			}
 		}else {
@@ -281,14 +306,16 @@ void loop()
 		bool error = (gearCount <= 1);
 		//Serial.println("errorDown: "+String(error));
 		if(gearCount <= 1){Serial.println("ignoring...");
+		Serial.println("current gear: "+String(gearCount));
 		shiftDownRequested = false;}
-		if(isFirstShiftDownRun){
+		if(isFirstShiftDownRun && shiftDownRequested){
 			startMillis = millis();
 			Serial.println("Shift Down Requested...");
 			Serial.println("first shift, start millis count and first shift set false");
 			isFirstShiftDownRun = false;
 			noInterrupts();
 			count = 0;
+			digitalWrite(TIME_UP_PIN, HIGH);
 			interrupts();
 		}
 
@@ -320,6 +347,7 @@ void loop()
 				Serial.println("shift took "+String(currentMillis - startMillis)+" ms");
 				gearCount = calcNextGear(gearCount, DOWN);
 				saveGearProtected(gearCount);
+				digitalWrite(TIME_UP_PIN, LOW);
 				//TODO: sort out another shift request happening while gear is being saved to memory
 			}
 		}else {
