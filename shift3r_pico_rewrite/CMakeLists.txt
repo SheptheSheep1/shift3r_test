@@ -44,7 +44,7 @@ pico_generate_pio_header(shift3r_pico_rewrite ${CMAKE_CURRENT_LIST_DIR}/quadratu
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(shift3r_pico_rewrite 0)
-pico_enable_stdio_usb(shift3r_pico_rewrite 0)
+pico_enable_stdio_usb(shift3r_pico_rewrite 1)
 
 
 # Add the standard library to the build

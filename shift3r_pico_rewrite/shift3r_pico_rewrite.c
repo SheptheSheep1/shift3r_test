@@ -19,6 +19,9 @@
 #define TIME_UP_PIN 1
 #define SHIFT_TIMEOUT_MS 500
 
+int32_t enc_count = 0;
+int32_t new_enc_count = 0;
+
 
 int main()
 {
@@ -31,7 +34,10 @@ int main()
 
 
     while (true) {
-        printf("Hello, world!\n");
-        sleep_ms(1000);
+        new_enc_count = quadrature_encoder_get_count(quadrature_pio, sm);
+        if(enc_count != new_enc_count){enc_count = new_enc_count; printf("\nenc: %8d", enc_count);}
+        //printf("Hello, world!\n");
+        //printf("enc: %8d", enc_count);
+        //sleep_ms(1000);
     }
 }
