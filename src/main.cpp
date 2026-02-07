@@ -7,22 +7,23 @@ extern "C" {
 
 // --- Defines ---
 #define FLASH_TARGET_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
-constexpr uint8_t ENCODER_PIN_A = 14;
-constexpr uint8_t ENCODER_PIN_B = 15;
-constexpr uint8_t LED_1 = 16;
-constexpr uint8_t LED_2 = 17;
-constexpr uint8_t ESC_PIN_PWM = 9;
-constexpr uint8_t SHIFT_DOWN_PIN = 18;
-constexpr uint8_t SHIFT_UP_PIN = 19;
+constexpr uint8_t ENCODER_PIN_A = 3;
+constexpr uint8_t ENCODER_PIN_B = 4;
+constexpr uint8_t LED_1 = 5;
+constexpr uint8_t LED_2 = 6;
+constexpr uint8_t SHIFT_DOWN_PIN = 28;
+constexpr uint8_t ESC_PIN_PWM =26;
+constexpr uint8_t SHIFT_UP_PIN = 27;
 constexpr uint8_t UP = 1;
 constexpr uint8_t DOWN = 0;
-constexpr uint8_t ECU_PWM_PIN = 4;
+constexpr uint8_t ECU_PWM_PIN = 2;
 constexpr uint8_t ECU_RANGE = 255;
-constexpr uint8_t TIME_UP_PIN = 20;
+constexpr uint8_t TIME_UP_PIN = 1;
+constexpr uint8_t SHIFT_TIMEOUT_MS = 500;
 
 // --- Macros for fast reading ---
 // The Arduino core handles the fast digitalRead() for RP2040 interrupts.
-#define FULL_SHIFT_COUNT 1700
+#define FULL_SHIFT_COUNT 512
 #define HALF_SHIFT_COUNT 1000
 
 // --- Variables ---
@@ -30,7 +31,6 @@ volatile int count = 0;
 volatile int upCount = 0;
 volatile int downCount = 0;
 int protectedCount = 0;
-int previousCount = 0;
 volatile int backLeftSpeed = 1460; 
 Servo esc;
 volatile bool shiftUpRequested = false;
@@ -95,22 +95,34 @@ void saveGearProtected(int8_t value){
 	restore_interrupts (ints);
 }
 
-int8_t* readGearFlash(){
-	int8_t *p;
-	uint32_t addr;
-	int first_empty_page = -1;
-	for(page = 0; page < FLASH_SECTOR_SIZE/FLASH_PAGE_SIZE; page++){
-		addr = XIP_BASE + FLASH_TARGET_OFFSET + (page * FLASH_PAGE_SIZE);
-		p = (int8_t*)addr;
-		Serial.print("First four bytes of page " + String(page, DEC) );
-		Serial.print("( at 0x" + (String(int(p), HEX)) + ") = ");
-		Serial.println(*p);
-		if( *p == -1 && first_empty_page < 0){
-			first_empty_page = page;
-			Serial.println("First empty page is #" + String(first_empty_page, DEC));
-		}
-	}
-	return p;
+int8_t readGearFlash() {
+    int8_t lastValidGear = 1; // Default fallback
+    bool foundData = false;
+
+    for (int p = 0; p < FLASH_SECTOR_SIZE / FLASH_PAGE_SIZE; p++) {
+        uint32_t addr = XIP_BASE + FLASH_TARGET_OFFSET + (p * FLASH_PAGE_SIZE);
+        int8_t *ptr = (int8_t *)addr;
+        int8_t val = *ptr;
+
+        // Flash is erased to -1 (0xFF). 
+        // If it's NOT -1, it's a gear we saved.
+        if (val != -1) {
+            lastValidGear = val;
+            foundData = true;
+        } else {
+            // We hit an empty page, so the previous page was the most recent data.
+            break; 
+        }
+    }
+
+    if (!foundData) {
+        Serial.println("No gear found in flash, using default: 1");
+    } else {
+        Serial.print("Recovered gear from flash: ");
+        Serial.println(lastValidGear);
+    }
+
+    return lastValidGear;
 }
 
 void isrA();
@@ -134,6 +146,7 @@ int8_t calcNextGear(int8_t gearCount, uint8_t direction){
 				currentGear++;
 				return currentGear;
 			}//else
+			break;
 		case DOWN:
 			if(currentGear == 2){
 				Serial.println("going to neutral");
@@ -143,6 +156,7 @@ int8_t calcNextGear(int8_t gearCount, uint8_t direction){
 				currentGear--;
 				return currentGear;
 			} //else
+			break;
 		default:
 			Serial.println("error; unexpected direction");
 			break;
@@ -201,6 +215,7 @@ void setup()
 	digitalWrite(LED_2, LOW);
 	pinMode(ECU_PWM_PIN, OUTPUT);
 	pinMode(TIME_UP_PIN, OUTPUT);
+	digitalWrite(TIME_UP_PIN, LOW);
 	analogWriteFreq(100000);
 	analogWriteRange(255);
 	//digitalReadFast(1);
@@ -213,7 +228,8 @@ void setup()
     
     Serial.begin(115200);
 	// restore gear from flash
-	gearCount = *readGearFlash();
+	//gearCount = readGearFlash();
+	//gearCount = 1;
 	//saveGearProtected(1);
 
     delay(1000); // Give time for serial to initialize
@@ -236,10 +252,10 @@ void requestShiftDown(void){
 void loop()
 {
     // Safely read the volatile count variable
-    noInterrupts();
-    protectedCount = count;
-    interrupts();
-	if(shiftUpRequested && shiftDownRequested){Serial.println("conflict!!!");}//do something
+	if(shiftUpRequested && shiftDownRequested){Serial.println("conflict!!!");
+		shiftUpRequested = false;
+		shiftDownRequested = false;
+	}//do something
 	if(shiftUpRequested){
 		bool error = (gearCount >= 6);
 		//Serial.println("errorUp: "+String(error));
@@ -248,15 +264,15 @@ void loop()
 		if(gearCount >= 6){Serial.println("ignoring...");
 			Serial.println("current gear: "+String(gearCount));
 		shiftUpRequested = false;}
-		if(isFirstShiftUpRun && shiftUpRequested){
+		if(isFirstShiftUpRun && shiftUpRequested && !error){
 			startMillis = millis();
 			Serial.println("Shift Up Requested...");
 			Serial.println("first shift, start millis count and first shift set false");
 			isFirstShiftUpRun = false;
-			noInterrupts();
+			//noInterrupts();
 			count = 0;
-			digitalWrite(TIME_UP_PIN, HIGH);
-			interrupts();
+			digitalWriteFast(TIME_UP_PIN, HIGH);
+			//interrupts();
 		}
 
 		//Serial.println("Shift Up Requested...");
@@ -271,28 +287,32 @@ void loop()
 
 		currentMillis = millis();
 		//Serial.println(currentMillis-startMillis);
-		if ((currentMillis - startMillis < 1000)&&!error)  //test whether the period has elapsed
+		if ((currentMillis - startMillis < SHIFT_TIMEOUT_MS)&&!error)  //test whether the period has elapsed
 		{
 			digitalWriteFast(LED_1, HIGH);
 			//Serial.print("\nencoder, ");
 			//Serial.print(count);
-			esc.writeMicroseconds(1300);
+			esc.writeMicroseconds(1000);
 			if (count < -1*FULL_SHIFT_COUNT){
 				Serial.println("shift up successful");
+				Serial.println("shift took "+String(currentMillis - startMillis)+" ms");
+				//noInterrupts();
 				digitalWriteFast(LED_1, LOW);
 				esc.writeMicroseconds(1500);
 				shiftUpRequested = false;
 				//gearCount++;
 				//Serial.println(gearCount);
-				Serial.println("shift took "+String(currentMillis - startMillis)+" ms");
 				isFirstShiftUpRun = true;
 				gearCount = calcNextGear(gearCount, UP);
 				if(gearCount == -1){Serial.println("Too high");}
-				digitalWrite(TIME_UP_PIN, LOW);
-				saveGearProtected(gearCount);
+				digitalWriteFast(TIME_UP_PIN, LOW);
+				//saveGearProtected(gearCount);
+				//interrupts();
 			}
 		}else {
+
 			Serial.println("up timeout");
+			digitalWriteFast(TIME_UP_PIN, LOW);
 			esc.writeMicroseconds(1500);
 			shiftUpRequested = false;
 			isFirstShiftUpRun = true;
@@ -308,15 +328,15 @@ void loop()
 		if(gearCount <= 1){Serial.println("ignoring...");
 		Serial.println("current gear: "+String(gearCount));
 		shiftDownRequested = false;}
-		if(isFirstShiftDownRun && shiftDownRequested){
+		if(isFirstShiftDownRun && shiftDownRequested && !error){
 			startMillis = millis();
 			Serial.println("Shift Down Requested...");
 			Serial.println("first shift, start millis count and first shift set false");
 			isFirstShiftDownRun = false;
-			noInterrupts();
+			//noInterrupts();
 			count = 0;
-			digitalWrite(TIME_UP_PIN, HIGH);
-			interrupts();
+			digitalWriteFast(TIME_UP_PIN, HIGH);
+			//interrupts();
 		}
 
 		if(shiftUpRequested){
@@ -332,25 +352,28 @@ void loop()
 		//Serial.println("time delta:" + String(currentMillis-startMillis));
 		//Serial.print("\ndown encoder, ");
 		//Serial.print(count);
-		if ((currentMillis - startMillis < 1000) && !error)  //test whether the period has elapsed
+		if ((currentMillis - startMillis < SHIFT_TIMEOUT_MS) && !error)  //test whether the period has elapsed
 		{
 			digitalWriteFast(LED_1, HIGH);
 			//Serial.print("\nencoder, ");
 			//Serial.print(count);
-			esc.writeMicroseconds(1700);
+			esc.writeMicroseconds(2000);
 			if (count >= FULL_SHIFT_COUNT){
+				//noInterrupts();
 				Serial.println("shift down successful");
+				Serial.println("shift took "+String(currentMillis - startMillis)+" ms");
 				digitalWriteFast(LED_1, LOW);
 				esc.writeMicroseconds(1500);
 				shiftDownRequested = false;
 				isFirstShiftDownRun = true;
-				Serial.println("shift took "+String(currentMillis - startMillis)+" ms");
 				gearCount = calcNextGear(gearCount, DOWN);
-				saveGearProtected(gearCount);
-				digitalWrite(TIME_UP_PIN, LOW);
+				//saveGearProtected(gearCount);
+				digitalWriteFast(TIME_UP_PIN, LOW);
+				//interrupts();
 				//TODO: sort out another shift request happening while gear is being saved to memory
 			}
 		}else {
+			digitalWriteFast(TIME_UP_PIN, LOW);
 			Serial.println("down timeout");
 			esc.writeMicroseconds(1500);
 			shiftDownRequested = false;
@@ -361,12 +384,6 @@ void loop()
 		//shiftDownRequested = false;
 	}
 
-    // Only print when the count changes
-    if(protectedCount != previousCount) {
-        //Serial.print("Encoder Count: ");
-        //Serial.println(protectedCount);
-    }
-    previousCount = protectedCount;
 	writeGearPos(gearCount);
 }
 
