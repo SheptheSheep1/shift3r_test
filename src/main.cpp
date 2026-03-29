@@ -20,10 +20,10 @@ constexpr uint8_t DOWN = 0;
 constexpr uint8_t ECU_PWM_PIN = 2;
 constexpr uint8_t ECU_RANGE = 255;
 //constexpr uint8_t TIME_UP_PIN = 1;
-constexpr uint8_t SHIFT_TIMEOUT_MS = 200;
+constexpr uint8_t SHIFT_TIMEOUT_MS = 70;
 
-constexpr uint16_t SHIFT_UP_SPEED = 1900;
-constexpr uint16_t SHIFT_DOWN_SPEED = 1100;
+constexpr uint16_t SHIFT_UP_SPEED = 1700;
+constexpr uint16_t SHIFT_DOWN_SPEED = 1300;
 constexpr uint16_t SHIFT_NEUTRAL_SPEED = 1500;
 
 // --- Macros for fast reading ---
@@ -129,8 +129,6 @@ int8_t readGearFlash() {
     return lastValidGear;
 }
 
-void isrA();
-void isrB();
 void requestShiftDown();
 void requestShiftUp();
 int8_t calcNextGear(int8_t gearCount, uint8_t direction);
@@ -226,11 +224,11 @@ void setup()
 
 	attachInterrupt(digitalPinToInterrupt(SHIFT_DOWN_PIN), requestShiftDown, RISING);
 	attachInterrupt(digitalPinToInterrupt(SHIFT_UP_PIN), requestShiftUp, RISING);
-    
+ 
     Serial.begin(115200);
 	// restore gear from flash
-	// gearCount = readGearFlash();
-	//gearCount = 1;
+	//gearCount = readGearFlash();
+	gearCount = 1;
 	//saveGearProtected(1);
 
     delay(1000); // Give time for serial to initialize
@@ -258,9 +256,10 @@ void loop()
 
 	}
     // Safely read the volatile count variable
-	if(shiftUpRequested && shiftDownRequested){Serial.println("conflict!!!");
+	if(shiftUpRequested && shiftDownRequested){Serial.println("conflict!!!"); // usually happens upon plug/replug 
 		shiftUpRequested = false;
 		shiftDownRequested = false;
+		esc.writeMicroseconds(SHIFT_NEUTRAL_SPEED);
 	}//do something
 	if(shiftUpRequested){
 		bool error = (gearCount >= 6);

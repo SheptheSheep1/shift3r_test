@@ -53,6 +53,7 @@ target_link_libraries(shift3r_pico_rewrite
         pico_stdlib
         pico_multicore
         hardware_pio
+        hardware_pwm
         )
 
 # Add the standard include files to the build
