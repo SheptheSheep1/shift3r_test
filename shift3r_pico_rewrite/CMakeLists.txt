@@ -35,12 +35,13 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(shift3r_pico_rewrite shift3r_pico_rewrite.c )
+add_executable(shift3r_pico_rewrite shift3r_pico_rewrite.c)
 
 pico_set_program_name(shift3r_pico_rewrite "shift3r_pico_rewrite")
 pico_set_program_version(shift3r_pico_rewrite "0.1")
 
 pico_generate_pio_header(shift3r_pico_rewrite ${CMAKE_CURRENT_LIST_DIR}/quadrature_encoder.pio)
+pico_generate_pio_header(shift3r_pico_rewrite ${CMAKE_CURRENT_LIST_DIR}/ws2812.pio)
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(shift3r_pico_rewrite 0)
@@ -50,9 +51,12 @@ pico_enable_stdio_usb(shift3r_pico_rewrite 1)
 # Add the standard library to the build
 target_link_libraries(shift3r_pico_rewrite
         pico_stdlib
-        pico_stdlib
-        pico_multicore
         hardware_pio
+        hardware_pwm
+        hardware_flash
+        hardware_sync
+        hardware_clocks
+        hardware_watchdog
         )
 
 # Add the standard include files to the build
@@ -61,4 +65,3 @@ target_include_directories(shift3r_pico_rewrite PRIVATE
 )
 
 pico_add_extra_outputs(shift3r_pico_rewrite)
-

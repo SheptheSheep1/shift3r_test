@@ -11,14 +11,14 @@ constexpr uint8_t ENCODER_PIN_A = 3;
 constexpr uint8_t ENCODER_PIN_B = 4;
 constexpr uint8_t LED_1 = 5;
 constexpr uint8_t LED_2 = 6;
-constexpr uint8_t SHIFT_DOWN_PIN = 28;
+constexpr uint8_t SHIFT_DOWN_PIN = 6;
 constexpr uint8_t ESC_PIN_PWM =26;
-constexpr uint8_t SHIFT_UP_PIN = 27;
+constexpr uint8_t SHIFT_UP_PIN = 7;
 constexpr uint8_t UP = 1;
 constexpr uint8_t DOWN = 0;
 constexpr uint8_t ECU_PWM_PIN = 2;
 constexpr uint8_t ECU_RANGE = 255;
-constexpr uint8_t TIME_UP_PIN = 1;
+//constexpr uint8_t TIME_UP_PIN = 1;
 constexpr uint8_t SHIFT_TIMEOUT_MS = 500;
 
 // --- Macros for fast reading ---
@@ -214,8 +214,6 @@ void setup()
 	digitalWrite(LED_1, LOW);
 	digitalWrite(LED_2, LOW);
 	pinMode(ECU_PWM_PIN, OUTPUT);
-	pinMode(TIME_UP_PIN, OUTPUT);
-	digitalWrite(TIME_UP_PIN, LOW);
 	analogWriteFreq(100000);
 	analogWriteRange(255);
 	//digitalReadFast(1);
@@ -271,7 +269,6 @@ void loop()
 			isFirstShiftUpRun = false;
 			//noInterrupts();
 			count = 0;
-			digitalWriteFast(TIME_UP_PIN, HIGH);
 			//interrupts();
 		}
 
@@ -305,14 +302,12 @@ void loop()
 				isFirstShiftUpRun = true;
 				gearCount = calcNextGear(gearCount, UP);
 				if(gearCount == -1){Serial.println("Too high");}
-				digitalWriteFast(TIME_UP_PIN, LOW);
 				//saveGearProtected(gearCount);
 				//interrupts();
 			}
 		}else {
 
 			Serial.println("up timeout");
-			digitalWriteFast(TIME_UP_PIN, LOW);
 			esc.writeMicroseconds(1500);
 			shiftUpRequested = false;
 			isFirstShiftUpRun = true;
@@ -335,7 +330,6 @@ void loop()
 			isFirstShiftDownRun = false;
 			//noInterrupts();
 			count = 0;
-			digitalWriteFast(TIME_UP_PIN, HIGH);
 			//interrupts();
 		}
 
@@ -368,12 +362,10 @@ void loop()
 				isFirstShiftDownRun = true;
 				gearCount = calcNextGear(gearCount, DOWN);
 				//saveGearProtected(gearCount);
-				digitalWriteFast(TIME_UP_PIN, LOW);
 				//interrupts();
 				//TODO: sort out another shift request happening while gear is being saved to memory
 			}
 		}else {
-			digitalWriteFast(TIME_UP_PIN, LOW);
 			Serial.println("down timeout");
 			esc.writeMicroseconds(1500);
 			shiftDownRequested = false;
