@@ -31,10 +31,10 @@
 
 #define ENCODER_PIN_A 3
 #define ENCODER_PIN_B 4
-#define SHIFT_DOWN_PIN 6
-#define SHIFT_UP_PIN 7
+#define SHIFT_DOWN_PIN 8
+#define SHIFT_UP_PIN 6
 #define ECU_PWM_PIN 2
-#define ESC_PIN_PWM 26
+#define ESC_PIN_PWM 17
 #define RGB_DATA_PIN 22
 #define RGB_POWER_PIN 23
 
@@ -43,12 +43,13 @@
 #define RETURN_HOME_TIMEOUT_US 200000ULL
 #define ESC_ACTIVE_LIMIT_US 275000ULL
 #define FAULT_COOLDOWN_US 300000ULL
-#define BUTTON_DEBOUNCE_US 0000ULL
+#define BUTTON_DEBOUNCE_US 0ULL
+#define SHIFT_REQUEST_MIN_ACTIVE_US 500ULL
 #define STATUS_LED_UPDATE_US 20000ULL
-#define LOOP_SLEEP_US 500ULL
+#define LOOP_SLEEP_US 100ULL
 #define MAIN_LOOP_WATCHDOG_MS 1000
 
-#define FULL_SHIFT_COUNTS 280
+#define FULL_SHIFT_COUNTS 290
 #define HALF_SHIFT_COUNTS 180
 #define SHIFT_TOLERANCE_COUNTS 32
 
@@ -115,6 +116,13 @@ typedef struct {
 } pwm_output_t;
 
 typedef struct {
+    uint gpio;
+    volatile bool candidate_active;
+    volatile bool validated_active;
+    volatile uint32_t candidate_started_us;
+} shift_input_t;
+
+typedef struct {
     shift_state_t state;
     gear_t gear;
     gear_t target_gear;
@@ -137,10 +145,8 @@ typedef struct {
     bool esc_is_active;
 } controller_t;
 
-static volatile bool g_shift_up_requested = false;
-static volatile bool g_shift_down_requested = false;
-static volatile uint64_t g_last_shift_up_irq_us = 0;
-static volatile uint64_t g_last_shift_down_irq_us = 0;
+static shift_input_t g_shift_up_input = {.gpio = SHIFT_UP_PIN};
+static shift_input_t g_shift_down_input = {.gpio = SHIFT_DOWN_PIN};
 
 static const uint8_t k_ecu_duty_by_gear[GEAR_COUNT] = {
     ECU_DUTY_NEUTRAL,
@@ -383,8 +389,6 @@ static void drive_direction(controller_t *controller,
 }
 
 static void enter_fault_cooldown(controller_t *controller, const char *reason, uint64_t timestamp_us) {
-    g_shift_up_requested = false;
-    g_shift_down_requested = false;
     controller->state = SHIFT_STATE_FAULT_COOLDOWN;
     controller->fault_reason = reason;
     controller->fault_started_us = timestamp_us;
@@ -506,6 +510,16 @@ static void finish_shift_cycle(controller_t *controller, uint64_t timestamp_us, 
 #endif
 }
 
+static void cancel_active_shift(controller_t *controller, const char *reason, uint64_t timestamp_us) {
+    controller->state = SHIFT_STATE_IDLE;
+    controller->state_started_us = timestamp_us;
+    controller->target_counts = 0;
+    controller->target_gear = controller->gear;
+    esc_set_target(controller, ESC_PWM_NEUTRAL_US, timestamp_us);
+
+    printf("%s\n", reason);
+}
+
 static void start_return_home(controller_t *controller, int32_t encoder_count, uint64_t timestamp_us) {
     const uint64_t shift_elapsed_us = timestamp_us - controller->shift_started_us;
     controller->gear = controller->target_gear;
@@ -601,6 +615,9 @@ static void handle_return_home_state(controller_t *controller, int32_t encoder_c
 }
 
 static void service_state_machine(controller_t *controller, int32_t encoder_count, uint64_t timestamp_us) {
+    const bool shift_up_active = g_shift_up_input.validated_active;
+    const bool shift_down_active = g_shift_down_input.validated_active;
+
     controller->last_encoder_count = encoder_count;
     esc_apply_command(controller, timestamp_us);
 
@@ -611,50 +628,69 @@ static void service_state_machine(controller_t *controller, int32_t encoder_coun
 
     switch (controller->state) {
         case SHIFT_STATE_IDLE:
-            if (g_shift_up_requested && g_shift_down_requested) {
-                g_shift_up_requested = false;
-                g_shift_down_requested = false;
+            if (shift_up_active && shift_down_active) {
                 enter_fault_cooldown(controller, "conflicting shift requests", timestamp_us);
                 return;
             }
 
-            if (g_shift_up_requested) {
-                g_shift_up_requested = false;
+            if (shift_up_active) {
                 begin_shift(controller, SHIFT_DIR_UP, encoder_count, timestamp_us);
-            } else if (g_shift_down_requested) {
-                g_shift_down_requested = false;
+            } else if (shift_down_active) {
                 begin_shift(controller, SHIFT_DIR_DOWN, encoder_count, timestamp_us);
             }
             break;
 
         case SHIFT_STATE_SHIFT_UP:
+            if (shift_down_active) {
+                enter_fault_cooldown(controller, "conflicting shift requests", timestamp_us);
+                return;
+            }
+            if (!shift_up_active) {
+                cancel_active_shift(controller, "Shift up command released, stopping actuation", timestamp_us);
+                return;
+            }
+            handle_shift_state(controller, encoder_count, timestamp_us);
+            break;
+
         case SHIFT_STATE_SHIFT_DOWN:
-            if (g_shift_up_requested || g_shift_down_requested) {
-                g_shift_up_requested = false;
-                g_shift_down_requested = false;
+            if (shift_up_active) {
+                enter_fault_cooldown(controller, "conflicting shift requests", timestamp_us);
+                return;
+            }
+            if (!shift_down_active) {
+                cancel_active_shift(controller, "Shift down command released, stopping actuation", timestamp_us);
+                return;
             }
             handle_shift_state(controller, encoder_count, timestamp_us);
             break;
 
         case SHIFT_STATE_PEAK_HOLD:
-            if (g_shift_up_requested || g_shift_down_requested) {
-                g_shift_up_requested = false;
-                g_shift_down_requested = false;
+            if (shift_up_active && shift_down_active) {
+                enter_fault_cooldown(controller, "conflicting shift requests", timestamp_us);
+                return;
+            }
+            if ((controller->direction == SHIFT_DIR_UP && !shift_up_active) ||
+                (controller->direction == SHIFT_DIR_DOWN && !shift_down_active)) {
+                cancel_active_shift(controller, "Shift command released during hold, stopping actuation", timestamp_us);
+                return;
             }
             handle_peak_hold_state(controller, encoder_count, timestamp_us);
             break;
 
         case SHIFT_STATE_RETURN_HOME:
-            if (g_shift_up_requested || g_shift_down_requested) {
-                g_shift_up_requested = false;
-                g_shift_down_requested = false;
+            if (shift_up_active && shift_down_active) {
+                enter_fault_cooldown(controller, "conflicting shift requests", timestamp_us);
+                return;
+            }
+            if ((controller->direction == SHIFT_DIR_UP && !shift_up_active) ||
+                (controller->direction == SHIFT_DIR_DOWN && !shift_down_active)) {
+                cancel_active_shift(controller, "Shift command released during return-home, stopping actuation", timestamp_us);
+                return;
             }
             handle_return_home_state(controller, encoder_count, timestamp_us);
             break;
 
         case SHIFT_STATE_FAULT_COOLDOWN:
-            g_shift_up_requested = false;
-            g_shift_down_requested = false;
             if ((timestamp_us - controller->fault_started_us) >= FAULT_COOLDOWN_US) {
                 controller->fault_reason = NULL;
                 controller->state = SHIFT_STATE_IDLE;
@@ -673,22 +709,30 @@ static void enforce_task_budget(controller_t *controller, const char *task_name,
     }
 }
 
-static void shift_request_irq(uint gpio, uint32_t events) {
-    (void)events;
-
-    const uint64_t timestamp_us = time_us_64();
-
-    if (gpio == SHIFT_UP_PIN) {
-        if ((timestamp_us - g_last_shift_up_irq_us) >= BUTTON_DEBOUNCE_US) {
-            g_shift_up_requested = true;
-            g_last_shift_up_irq_us = timestamp_us;
-        }
-    } else if (gpio == SHIFT_DOWN_PIN) {
-        if ((timestamp_us - g_last_shift_down_irq_us) >= BUTTON_DEBOUNCE_US) {
-            g_shift_down_requested = true;
-            g_last_shift_down_irq_us = timestamp_us;
-        }
+static void service_shift_input(shift_input_t *input, uint32_t timestamp_us) {
+    if (gpio_get(input->gpio) != 0) {
+        input->candidate_active = false;
+        input->validated_active = false;
+        return;
     }
+
+    if (!input->candidate_active) {
+        input->candidate_active = true;
+        input->candidate_started_us = timestamp_us;
+        return;
+    }
+
+    if ((uint32_t)(timestamp_us - input->candidate_started_us) < SHIFT_REQUEST_MIN_ACTIVE_US) {
+        return;
+    }
+
+    input->validated_active = true;
+}
+
+static void service_shift_requests(uint64_t timestamp_us) {
+    const uint32_t timestamp32_us = (uint32_t)timestamp_us;
+    service_shift_input(&g_shift_up_input, timestamp32_us);
+    service_shift_input(&g_shift_down_input, timestamp32_us);
 }
 
 static void init_encoder_pio(void) {
@@ -712,9 +756,6 @@ static void init_shift_inputs(void) {
     gpio_init(SHIFT_DOWN_PIN);
     gpio_set_dir(SHIFT_DOWN_PIN, GPIO_IN);
     gpio_pull_up(SHIFT_DOWN_PIN);
-
-    gpio_set_irq_enabled_with_callback(SHIFT_UP_PIN, GPIO_IRQ_EDGE_FALL, true, &shift_request_irq);
-    gpio_set_irq_enabled(SHIFT_DOWN_PIN, GPIO_IRQ_EDGE_FALL, true);
 }
 
 static void init_rgb_power(void) {
@@ -747,10 +788,11 @@ static void init_controller(controller_t *controller) {
     update_status_led(controller);
 
     printf("Initial gear: %s\n", gear_name(controller->gear));
-    printf("Persistence: %s, ramping: %s, P control: %s\n",
+    printf("Persistence: %s, ramping: %s, P control: %s, shift filter: %llu us\n",
            ENABLE_GEAR_PERSISTENCE ? "enabled" : "disabled",
            ENABLE_ESC_RAMP ? "enabled" : "disabled",
-           ENABLE_ESC_P_CONTROL ? "enabled" : "disabled");
+           ENABLE_ESC_P_CONTROL ? "enabled" : "disabled",
+           (unsigned long long)SHIFT_REQUEST_MIN_ACTIVE_US);
 }
 
 int main(void) {
@@ -770,6 +812,8 @@ int main(void) {
         const uint64_t loop_started_us = now_us();
         const int32_t encoder_count = quadrature_encoder_get_count(g_encoder_pio, g_encoder_sm);
         const uint64_t timestamp_us = now_us();
+
+        service_shift_requests(timestamp_us);
 
         const uint64_t state_started_us = timestamp_us;
         service_state_machine(&g_controller, encoder_count, timestamp_us);

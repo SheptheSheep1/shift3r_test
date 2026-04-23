@@ -10,13 +10,13 @@ extern "C" {
 constexpr uint8_t ENCODER_PIN_A = 3;
 constexpr uint8_t ENCODER_PIN_B = 4;
 constexpr uint8_t LED_1 = 5;
-constexpr uint8_t LED_2 = 6;
-constexpr uint8_t SHIFT_DOWN_PIN = 6;
+constexpr uint8_t LED_2 = 5;
+constexpr uint8_t SHIFT_DOWN_PIN = 9;
 constexpr uint8_t ESC_PIN_PWM =26;
-constexpr uint8_t SHIFT_UP_PIN = 7;
+constexpr uint8_t SHIFT_UP_PIN = 10;
 constexpr uint8_t UP = 1;
 constexpr uint8_t DOWN = 0;
-constexpr uint8_t ECU_PWM_PIN = 2;
+constexpr uint8_t ECU_PWM_PIN = 22;
 constexpr uint8_t ECU_RANGE = 255;
 //constexpr uint8_t TIME_UP_PIN = 1;
 constexpr uint8_t SHIFT_TIMEOUT_MS = 500;
@@ -372,9 +372,10 @@ void loop()
 			isFirstShiftDownRun = true;
 		}
 		
-
 		//shiftDownRequested = false;
 	}
+		Serial.println("DOWN:" + String(digitalRead(SHIFT_DOWN_PIN)));
+		Serial.println(String(digitalRead(SHIFT_UP_PIN)));
 
 	writeGearPos(gearCount);
 }
