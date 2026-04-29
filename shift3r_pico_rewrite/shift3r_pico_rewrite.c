@@ -31,10 +31,10 @@
 
 #define ENCODER_PIN_A 3
 #define ENCODER_PIN_B 4
-#define SHIFT_DOWN_PIN 8
-#define SHIFT_UP_PIN 6
+#define SHIFT_DOWN_PIN 7
+#define SHIFT_UP_PIN 0
 #define ECU_PWM_PIN 2
-#define ESC_PIN_PWM 17
+#define ESC_PIN_PWM 26
 #define RGB_DATA_PIN 22
 #define RGB_POWER_PIN 23
 
